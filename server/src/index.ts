@@ -5,6 +5,7 @@ dotenv.config()
 
 import express from "express";
 import userRouter from "./routes/user/user.routes.js";
+import fleetRouter from "./routes/fleet/fleet.routes.js";
 const app = express();
 
 app.use(express.json())
@@ -15,7 +16,8 @@ app.get("/",(req, res)=>{
     });
 })
 
-app.use("/api/v1/user",userRouter)
+app.use("/api/v1/user", userRouter)
+app.use("/api/v1/fleet", fleetRouter)
 
 
 app.listen(process.env.PORT,()=>{
