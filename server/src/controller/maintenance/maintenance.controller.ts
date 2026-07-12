@@ -1,240 +1,129 @@
 import { Request, Response } from "express";
 import { prisma } from "../../db/db.js";
 import {
+  createSuccess,
   sendSuccess,
   sendError,
-  createSuccess,
-  notFoundError,
   validationError,
-  updateSuccess,
+  notFoundError,
 } from "../../utils/responsehandler.js";
 import { MaintenanceStatus, VehicleStatus } from "@prisma/client";
 
-// Helper to map user status ('Active', 'Completed') to DB enum
-const mapToDbStatus = (status: string): MaintenanceStatus => {
-  const norm = status.toLowerCase();
-  if (norm === "active") return MaintenanceStatus.IN_PROGRESS;
-  if (norm === "completed") return MaintenanceStatus.COMPLETED;
-  
-  // Also support direct DB enum strings
-  const uppercase = status.toUpperCase();
-  if (Object.values(MaintenanceStatus).includes(uppercase as MaintenanceStatus)) {
-    return uppercase as MaintenanceStatus;
-  }
-  throw new Error(`Invalid maintenance status: ${status}. Expected 'Active' or 'Completed'`);
-};
-
-// Helper to map DB enum back to user status format
-const mapToUserStatus = (status: MaintenanceStatus): string => {
-  if (status === MaintenanceStatus.IN_PROGRESS || status === MaintenanceStatus.SCHEDULED) {
-    return "Active";
-  }
-  if (status === MaintenanceStatus.COMPLETED) {
-    return "Completed";
-  }
-  return status; // CANCELLED etc.
-};
-
-/**
- * Helper to safely parse floats
- */
-function Float(val: any): number {
-  const num = parseFloat(val);
-  return isNaN(num) ? 0 : num;
-}
-
-/**
- * Create a new Maintenance Log
- */
+// ─────────────────────────────────────────────────────────────
+// POST /api/v1/maintenance
+// Role: Fleet Manager — logs a vehicle into the shop
+// Body: { vehicleId, serviceType, cost, date, description?, mechanic? }
+// ─────────────────────────────────────────────────────────────
 export const createMaintenance = async (req: Request, res: Response) => {
-  try {
-    const { vehicleId, serviceType, cost, date, status, description, partsUsed, mechanic } = req.body;
+  const { vehicleId, serviceType, cost, date, description, mechanic } = req.body;
 
-    if (!vehicleId || !serviceType || cost === undefined || !date) {
-      return validationError(res, "Missing required fields: vehicleId, serviceType, cost, date");
-    }
+  if (!vehicleId || !serviceType || cost === undefined || !date) {
+    return validationError(res, "vehicleId, serviceType, cost, and date are required");
+  }
 
-    // Check if vehicle exists
-    const vehicle = await prisma.vehicle.findUnique({
+  const vehicle = await prisma.vehicle.findUnique({ where: { id: Number(vehicleId) } });
+  if (!vehicle) return notFoundError(res, `Vehicle ${vehicleId} not found`);
+
+  if (vehicle.status === VehicleStatus.ON_TRIP) {
+    return sendError(res, "Cannot schedule maintenance for a vehicle currently on a trip", undefined, 409);
+  }
+
+  const [maintenanceLog] = await prisma.$transaction([
+    // Create the maintenance record
+    prisma.maintenanceLog.create({
+      data: {
+        vehicleId: Number(vehicleId),
+        serviceType,
+        cost: Number(cost),
+        startDate: new Date(date),
+        description: description ?? null,
+        mechanic: mechanic ?? null,
+        status: MaintenanceStatus.IN_PROGRESS,
+      },
+      include: {
+        vehicle: { select: { id: true, registrationNumber: true, name: true } },
+      },
+    }),
+    // Side effect: put vehicle IN_SHOP
+    prisma.vehicle.update({
       where: { id: Number(vehicleId) },
-    });
-    if (!vehicle) {
-      return notFoundError(res, `Vehicle with ID ${vehicleId} not found`);
-    }
+      data:  { status: VehicleStatus.IN_SHOP },
+    }),
+  ]);
 
-    // Map user status (default is 'Active')
-    let dbStatus: MaintenanceStatus = MaintenanceStatus.IN_PROGRESS;
-    if (status) {
-      try {
-        dbStatus = mapToDbStatus(status);
-      } catch (err: any) {
-        return validationError(res, err.message);
-      }
-    }
-
-    const startDate = new Date(date);
-    const endDate = dbStatus === MaintenanceStatus.COMPLETED ? new Date() : null;
-
-    const maintenanceLog = await prisma.$transaction(async (tx) => {
-      const log = await tx.maintenanceLog.create({
-        data: {
-          vehicleId: Number(vehicleId),
-          serviceType,
-          cost: Float(cost),
-          startDate,
-          endDate,
-          status: dbStatus,
-          description,
-          partsUsed: partsUsed || null,
-          mechanic,
-        },
-      });
-
-      // Update vehicle status
-      if (dbStatus === MaintenanceStatus.IN_PROGRESS) {
-        await tx.vehicle.update({
-          where: { id: Number(vehicleId) },
-          data: { status: VehicleStatus.IN_SHOP },
-        });
-      } else if (dbStatus === MaintenanceStatus.COMPLETED) {
-        // If created as completed, ensure vehicle status is AVAILABLE (or remains AVAILABLE)
-        await tx.vehicle.update({
-          where: { id: Number(vehicleId) },
-          data: { status: VehicleStatus.AVAILABLE },
-        });
-      }
-
-      return log;
-    });
-
-    const userFriendlyResponse = {
-      ...maintenanceLog,
-      status: mapToUserStatus(maintenanceLog.status),
-    };
-
-    return createSuccess(res, userFriendlyResponse, "Maintenance log created successfully");
-  } catch (error: any) {
-    return sendError(res, "Error creating maintenance log", error.message);
-  }
+  return createSuccess(res, maintenanceLog, "Maintenance scheduled and vehicle moved to IN_SHOP");
 };
 
-/**
- * Get all Maintenance Logs
- */
+// ─────────────────────────────────────────────────────────────
+// GET /api/v1/maintenance
+// Query: ?vehicleId=1&status=IN_PROGRESS
+// ─────────────────────────────────────────────────────────────
 export const getMaintenanceLogs = async (req: Request, res: Response) => {
-  try {
-    const { vehicleId, status } = req.query;
+  const { vehicleId, status } = req.query;
 
-    const where: any = {};
-    if (vehicleId) {
-      where.vehicleId = Number(vehicleId);
-    }
-    if (status) {
-      try {
-        where.status = mapToDbStatus(status as string);
-      } catch (err) {
-        where.status = status;
-      }
-    }
+  const where: any = {};
 
-    const logs = await prisma.maintenanceLog.findMany({
-      where,
-      include: {
-        vehicle: true,
-      },
-      orderBy: { startDate: "desc" },
-    });
-
-    const userFriendlyLogs = logs.map((log) => ({
-      ...log,
-      status: mapToUserStatus(log.status),
-    }));
-
-    return sendSuccess(res, "Maintenance logs retrieved successfully", userFriendlyLogs);
-  } catch (error: any) {
-    return sendError(res, "Error retrieving maintenance logs", error.message);
+  if (vehicleId) {
+    const id = parseInt(vehicleId as string);
+    if (isNaN(id)) return validationError(res, "vehicleId must be a valid number");
+    where.vehicleId = id;
   }
+
+  if (status) {
+    const upperStatus = (status as string).toUpperCase();
+    if (!Object.values(MaintenanceStatus).includes(upperStatus as MaintenanceStatus)) {
+      return validationError(res, `Invalid status. Allowed: ${Object.values(MaintenanceStatus).join(", ")}`);
+    }
+    where.status = upperStatus as MaintenanceStatus;
+  }
+
+  const logs = await prisma.maintenanceLog.findMany({
+    where,
+    include: {
+      vehicle: { select: { id: true, registrationNumber: true, name: true, type: true } },
+    },
+    orderBy: { startDate: "desc" },
+  });
+
+  return sendSuccess(res, "Maintenance logs fetched successfully", { data: logs, count: logs.length });
 };
 
-/**
- * Get Maintenance Log by ID
- */
-export const getMaintenanceLogById = async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-
-    const log = await prisma.maintenanceLog.findUnique({
-      where: { id: Number(id) },
-      include: {
-        vehicle: true,
-      },
-    });
-
-    if (!log) {
-      return notFoundError(res, `Maintenance log with ID ${id} not found`);
-    }
-
-    const userFriendlyLog = {
-      ...log,
-      status: mapToUserStatus(log.status),
-    };
-
-    return sendSuccess(res, "Maintenance log retrieved successfully", userFriendlyLog);
-  } catch (error: any) {
-    return sendError(res, "Error retrieving maintenance log", error.message);
-  }
-};
-
-/**
- * Complete an Active Maintenance Log
- */
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/v1/maintenance/:id/complete
+// Marks the maintenance done and returns vehicle to AVAILABLE
+// ─────────────────────────────────────────────────────────────
 export const completeMaintenance = async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { cost, partsUsed, mechanic, endDate } = req.body;
+  const maintenanceId = Number(req.params.id);
 
-    const log = await prisma.maintenanceLog.findUnique({
-      where: { id: Number(id) },
-    });
+  const log = await prisma.maintenanceLog.findUnique({ where: { id: maintenanceId } });
+  if (!log) return notFoundError(res, `Maintenance record ${maintenanceId} not found`);
 
-    if (!log) {
-      return notFoundError(res, `Maintenance log with ID ${id} not found`);
-    }
-
-    if (log.status === MaintenanceStatus.COMPLETED) {
-      return validationError(res, "Maintenance log is already completed");
-    }
-
-    const finalEndDate = endDate ? new Date(endDate) : new Date();
-
-    const updatedLog = await prisma.$transaction(async (tx) => {
-      const updated = await tx.maintenanceLog.update({
-        where: { id: Number(id) },
-        data: {
-          status: MaintenanceStatus.COMPLETED,
-          endDate: finalEndDate,
-          cost: cost !== undefined ? Float(cost) : log.cost,
-          partsUsed: partsUsed !== undefined ? partsUsed : log.partsUsed,
-          mechanic: mechanic !== undefined ? mechanic : log.mechanic,
-        },
-      });
-
-      // Update vehicle status back to AVAILABLE
-      await tx.vehicle.update({
-        where: { id: log.vehicleId },
-        data: { status: VehicleStatus.AVAILABLE },
-      });
-
-      return updated;
-    });
-
-    const userFriendlyResponse = {
-      ...updatedLog,
-      status: mapToUserStatus(updatedLog.status),
-    };
-
-    return updateSuccess(res, userFriendlyResponse, "Maintenance log completed successfully");
-  } catch (error: any) {
-    return sendError(res, "Error completing maintenance log", error.message);
+  if (log.status === MaintenanceStatus.COMPLETED) {
+    return sendError(res, "Maintenance record is already completed", undefined, 409);
   }
+
+  if (log.status === MaintenanceStatus.CANCELLED) {
+    return sendError(res, "Cannot complete a cancelled maintenance record", undefined, 409);
+  }
+
+  const [updatedLog] = await prisma.$transaction([
+    // Mark maintenance completed
+    prisma.maintenanceLog.update({
+      where: { id: maintenanceId },
+      data: {
+        status: MaintenanceStatus.COMPLETED,
+        endDate: new Date(),
+      },
+      include: {
+        vehicle: { select: { id: true, registrationNumber: true, name: true } },
+      },
+    }),
+    // Side effect: return vehicle to AVAILABLE
+    prisma.vehicle.update({
+      where: { id: log.vehicleId },
+      data:  { status: VehicleStatus.AVAILABLE },
+    }),
+  ]);
+
+  return sendSuccess(res, "Maintenance completed and vehicle returned to AVAILABLE", updatedLog);
 };
