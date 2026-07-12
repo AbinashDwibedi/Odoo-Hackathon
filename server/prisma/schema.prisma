@@ -7,12 +7,252 @@ datasource db {
 
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
+enum UserRole {
+  FLEET_MANAGER
+  DISPATCHER
+  SAFETY_OFFICER
+  FINANCIAL_ANALYST
 }
 
+enum VehicleType {
+  VAN
+  TRUCK
+  MINI
+  PICKUP
+  BIKE
+  BUS
+  OTHER
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  ON_TRIP
+  IN_SHOP
+  RETIRED
+}
+
+enum DriverStatus {
+  AVAILABLE
+  ON_TRIP
+  OFF_DUTY
+  SUSPENDED
+}
+
+enum LicenseCategory {
+  LMV
+  HMV
+  MOTORCYCLE
+}
+
+enum TripStatus {
+  DRAFT
+  DISPATCHED
+  COMPLETED
+  CANCELLED
+}
+
+enum MaintenanceStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ExpenseType {
+  FUEL
+  TOLL
+  OTHER
+}
+
+// ═══════════════════════════════════════════════════════
+// USER / AUTHENTICATION (RBAC + Account Locking)
+// ═══════════════════════════════════════════════════════
+
+model User {
+  id                Int      @id @default(autoincrement())
+  email             String   @unique
+  passwordHash      String   @map("password_hash")
+  role              UserRole @default(DISPATCHER)
+  image             String?
+  
+  // Account locking (from your requirements)
+  failedLoginAttempts Int     @default(0) @map("failed_login_attempts")
+  isLocked            Boolean @default(false) @map("is_locked")
+  lockUntil           DateTime? @map("lock_until")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+
+  driverProfile Driver?
+
+  @@map("users")
+}
+
+// ═══════════════════════════════════════════════════════
+// VEHICLE REGISTRY
+// ═══════════════════════════════════════════════════════
+
+model Vehicle {
+  id                Int           @id @default(autoincrement())
+  registrationNumber String      @unique @map("registration_number")
+  name              String
+  model             String?
+  type              VehicleType   @default(VAN)
+  maxLoadCapacity   Float         @map("max_load_capacity")
+  odometer          Float         @default(0)
+  acquisitionCost   Float         @map("acquisition_cost")
+  status            VehicleStatus @default(AVAILABLE)
+  
+  // Optional metadata
+  yearOfManufacture Int?          @map("year_of_manufacture")
+  insuranceExpiry   DateTime?     @map("insurance_expiry")
+  permitExpiry      DateTime?     @map("permit_expiry")
+  documents         Json?         // {rcBook: "url", insurance: "url"}
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  trips        Trip[]
+  maintenances MaintenanceLog[]
+  expenses     Expense[]
+
+  @@index([status])
+  @@index([type])
+  @@map("vehicles")
+}
+
+// ═══════════════════════════════════════════════════════
+// DRIVER MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+model Driver {
+  id                Int             @id @default(autoincrement())
+  name              String
+  licenseNumber     String          @unique @map("license_number")
+  licenseCategory   LicenseCategory @default(LMV) @map("license_category")
+  licenseExpiry     DateTime        @map("license_expiry")
+  contactNumber     String          @map("contact_number")
+  
+  // Metrics
+  safetyScore        Float   @default(100) @map("safety_score")
+  tripCompletionRate Float   @default(100) @map("trip_completion_rate")
+  
+  status            DriverStatus @default(AVAILABLE)
+  address           String?
+  emergencyContact  String?      @map("emergency_contact")
+  documents         Json?        // {licenseDoc: "url", medicalCert: "url"}
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  userId Int?  @unique @map("user_id")
+  user   User? @relation(fields: [userId], references: [id])
+
+  trips Trip[]
+
+  @@index([status])
+  @@index([licenseExpiry])
+  @@map("drivers")
+}
+
+// ═══════════════════════════════════════════════════════
+// TRIP MANAGEMENT (State Machine)
+// ═══════════════════════════════════════════════════════
+
+model Trip {
+  id              Int        @id @default(autoincrement())
+  tripId          String     @unique @default(dbgenerated("gen_random_uuid()")) @map("trip_id")
+  source          String
+  destination     String
+  cargoWeight     Float      @map("cargo_weight")
+  plannedDistance Float      @map("planned_distance")
+  actualDistance  Float?     @map("actual_distance")
+  fuelConsumed    Float?     @map("fuel_consumed")
+  
+  // Lifecycle timestamps
+  dispatchedAt DateTime? @map("dispatched_at")
+  completedAt  DateTime? @map("completed_at")
+  
+  status TripStatus @default(DRAFT)
+  notes  String?
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  vehicleId Int     @map("vehicle_id")
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+
+  driverId Int    @map("driver_id")
+  driver   Driver @relation(fields: [driverId], references: [id])
+
+  // Creator (dispatcher) — optional audit trail
+  createdBy Int?    @map("created_by")
+  
+  expenses Expense[]
+
+  @@index([status])
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([createdAt])
+  @@map("trips")
+}
+
+// ═══════════════════════════════════════════════════════
+// MAINTENANCE LOGS
+// ═══════════════════════════════════════════════════════
+
+model MaintenanceLog {
+  id          Int               @id @default(autoincrement())
+  serviceType String            @map("service_type")
+  description String?
+  cost        Float
+  startDate   DateTime          @map("start_date")
+  endDate     DateTime?         @map("end_date")
+  status      MaintenanceStatus @default(SCHEDULED)
+  partsUsed   Json?             @map("parts_used")
+  mechanic    String?
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  vehicleId Int     @map("vehicle_id")
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@index([vehicleId])
+  @@index([status])
+  @@map("maintenance_logs")
+}
+
+// ═══════════════════════════════════════════════════════
+// EXPENSES (Fuel + Toll + Other — Unified Model)
+// ═══════════════════════════════════════════════════════
+
+model Expense {
+  id          Int         @id @default(autoincrement())
+  type        ExpenseType
+  amount      Float
+  liters      Float?      // Only applicable if type == FUEL
+  date        DateTime
+  description String?
+  receiptUrl  String?     @map("receipt_url")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations — linked to Vehicle (required) and optionally Trip
+  vehicleId Int     @map("vehicle_id")
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+
+  tripId Int?   @map("trip_id")
+  trip   Trip?  @relation(fields: [tripId], references: [id])
+
+  @@index([vehicleId])
+  @@index([tripId])
+  @@index([type])
+  @@index([date])
+  @@map("expenses")
+}
