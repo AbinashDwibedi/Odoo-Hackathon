@@ -10,14 +10,17 @@ import {
   cancelTrip,
 } from "../../controller/trip/trip.controller.js";
 
+import { authValidation } from "../../middlewares/authMiddleware/auth.middleware.js";
+import { dispatcherAuthValidation } from "../../middlewares/authMiddleware/roleBased.auth.middleware.js";
+
 const tripRouter = Router();
 
-tripRouter.post("/", asyncHandler(createTrip));
-tripRouter.get("/", asyncHandler(getTrips));
-tripRouter.get("/:id", asyncHandler(getTripById));
-tripRouter.put("/:id", asyncHandler(updateTrip));
-tripRouter.patch("/:id/dispatch", asyncHandler(dispatchTrip));
-tripRouter.patch("/:id/complete", asyncHandler(completeTrip));
-tripRouter.patch("/:id/cancel", asyncHandler(cancelTrip));
+tripRouter.post("/", dispatcherAuthValidation, asyncHandler(createTrip));
+tripRouter.get("/", authValidation, asyncHandler(getTrips));
+tripRouter.get("/:id", authValidation, asyncHandler(getTripById));
+tripRouter.put("/:id", dispatcherAuthValidation, asyncHandler(updateTrip));
+tripRouter.patch("/:id/dispatch", dispatcherAuthValidation, asyncHandler(dispatchTrip));
+tripRouter.patch("/:id/complete", dispatcherAuthValidation, asyncHandler(completeTrip));
+tripRouter.patch("/:id/cancel", dispatcherAuthValidation, asyncHandler(cancelTrip));
 
 export default tripRouter;
