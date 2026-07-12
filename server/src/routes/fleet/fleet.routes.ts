@@ -6,19 +6,24 @@ import {
   getDrivers,
   createDriver,
 } from "../../controller/fleet/fleet.controller.js";
+import { authValidation } from "../../middlewares/authMiddleware/auth.middleware.js";
+import {
+  fleetManagerAuthValidation,
+  safetyOfficerAuthValidation,
+} from "../../middlewares/authMiddleware/roleBased.auth.middleware.js";
 
 const fleetRouter = Router();
 
 // ─── Vehicles ───────────────────────────────
-// GET  /api/v1/fleet/vehicles  — list/filter vehicles
-// POST /api/v1/fleet/vehicles  — create a new vehicle (Fleet Manager)
-fleetRouter.get("/vehicles", asyncHandler(getVehicles));
-fleetRouter.post("/vehicles", asyncHandler(createVehicle));
+// GET  /api/v1/fleet/vehicles  — any authenticated user
+// POST /api/v1/fleet/vehicles  — Fleet Manager only
+fleetRouter.get("/vehicles", authValidation, asyncHandler(getVehicles));
+fleetRouter.post("/vehicles", fleetManagerAuthValidation, asyncHandler(createVehicle));
 
 // ─── Drivers ────────────────────────────────
-// GET  /api/v1/fleet/drivers   — list/filter drivers
-// POST /api/v1/fleet/drivers   — create a new driver (Safety Officer)
-fleetRouter.get("/drivers", asyncHandler(getDrivers));
-fleetRouter.post("/drivers", asyncHandler(createDriver));
+// GET  /api/v1/fleet/drivers   — any authenticated user
+// POST /api/v1/fleet/drivers   — Safety Officer only
+fleetRouter.get("/drivers", authValidation, asyncHandler(getDrivers));
+fleetRouter.post("/drivers", safetyOfficerAuthValidation, asyncHandler(createDriver));
 
 export default fleetRouter;
